@@ -12,7 +12,7 @@ Panels for Auto Paint Boundaries.
 
 import bpy
 
-from .delimiter import SUPPORTED_MODES
+from .delimiter import SUPPORTED_MODES, _has_topology_modifiers
 
 
 class VIEW3D_PT_paint_area_limiters(bpy.types.Panel):
@@ -41,6 +41,17 @@ class VIEW3D_PT_paint_area_limiters(bpy.types.Panel):
         layout.use_property_decorate = False
         layout.active = settings.delimiter_enabled
 
+        # Warn when unapplied modifiers change the face count and pin
+        # is off.  The deferred _clear_mask races with Blender's TBB
+        # paint workers on the evaluated mesh copy, causing a crash.
+        # With pin enabled, _schedule_clear never fires — no race.
+        obj = context.active_object
+        has_topo_mods = (
+            obj is not None
+            and obj.type == "MESH"
+            and _has_topology_modifiers(context, obj)
+        )
+
         col = layout.column()
 
         # -- Pin (behavioral modifier) — sits at the top ---------------
@@ -50,6 +61,19 @@ class VIEW3D_PT_paint_area_limiters(bpy.types.Panel):
                  icon='PINNED' if settings.pin_mask_area else 'UNPINNED')
         if settings.pin_mask_area:
             row.operator("paint_limit.clear", text="", icon='X')
+
+        if has_topo_mods and not settings.pin_mask_area:
+            box = col.box()
+            box.alert = True
+            box.label(text="Pin Mask Area required!", icon='ERROR')
+            inner = box.column(align=True)
+            inner.scale_y = 0.75
+            inner.label(text="Modifiers that change face count")
+            inner.label(text="(e.g. Subdivision Surface) require")
+            inner.label(text="Pin Mask Area to be enabled, or")
+            inner.label(text="apply the modifiers first.")
+            inner.label(text="Pin will be auto-enabled on use.")
+            return
 
         col.separator(factor=0.5)
 

@@ -189,6 +189,12 @@ def register():
                 ctrl=True,
             )
             _addon_keymaps.append((km, kmi))
+            # Alt+LMB — replace pinned mask with new region
+            kmi = km.keymap_items.new(
+                "paint_limit.auto_select", 'LEFTMOUSE', 'PRESS',
+                ctrl=True, shift=True,
+            )
+            _addon_keymaps.append((km, kmi))
             # D — toggle limiter on/off
             kmi = km.keymap_items.new(
                 "paint_limit.toggle", 'D', 'PRESS',

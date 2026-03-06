@@ -44,9 +44,31 @@ def _resolve_viewport(context, event):
     return None, None
 
 
+def _has_topology_modifiers(context, obj):
+    """Return True if the modifier stack changes the face count.
+
+    When the evaluated mesh has more (or fewer) faces than ``obj.data``,
+    any write from Python to the original mesh triggers a depsgraph dirty
+    notification on the separate evaluated copy.  Blender's TBB paint
+    workers may be reading that evaluated copy concurrently, causing an
+    access-violation crash in ``project_face_seams_init``.
+    """
+    depsgraph = context.evaluated_depsgraph_get()
+    obj_eval = obj.evaluated_get(depsgraph)
+    return len(obj_eval.data.polygons) != len(obj.data.polygons)
+
+
 def _raycast_face(context, event, obj):
-    """Raycast and return the face index hit, or -1 on miss."""
+    """Raycast and return the face index hit, or -1 on miss.
+
+    Uses a BVHTree built from ``obj.data`` (the original, unmodified
+    mesh) so the returned face index is always valid for
+    ``obj.data.polygons``.  ``Object.ray_cast`` and variants silently
+    evaluate modifiers and return indices from the subdivided mesh.
+    """
     from bpy_extras import view3d_utils
+    from mathutils.bvhtree import BVHTree
+    import bmesh
 
     region, rv3d = _resolve_viewport(context, event)
     if region is None:
@@ -60,18 +82,27 @@ def _raycast_face(context, event, obj):
     local_origin = mat_inv @ ray_origin
     local_dir = (mat_inv.to_3x3() @ ray_dir).normalized()
 
-    depsgraph = context.evaluated_depsgraph_get()
-    obj_eval = obj.evaluated_get(depsgraph)
+    bm = bmesh.new()
+    try:
+        bm.from_mesh(obj.data)
+        bvh = BVHTree.FromBMesh(bm)
+    finally:
+        bm.free()
 
-    success, _location, _normal, face_index = obj_eval.ray_cast(
-        local_origin, local_dir,
-    )
-    return face_index if success else -1
+    _location, _normal, face_index, _dist = bvh.ray_cast(local_origin, local_dir)
+    return face_index if face_index is not None else -1
 
 
 def _select_faces(mesh, face_indices, additive=False, subtract=False):
     """Select faces on the mesh.  When *additive* is True, add to the
-    existing selection.  When *subtract* is True, remove from it."""
+    existing selection.  When *subtract* is True, remove from it.
+
+    Does **not** call ``mesh.update()`` — that triggers a depsgraph
+    re-evaluation which races with brush stroke initialisation and
+    causes partially-applied masks.  ``_flush_selection()`` is called
+    separately afterward and is all that's needed to sync selection
+    flags to the evaluated mesh.
+    """
     n = len(mesh.polygons)
     if additive or subtract:
         sel = np.zeros(n, dtype=bool)
@@ -85,7 +116,6 @@ def _select_faces(mesh, face_indices, additive=False, subtract=False):
             else:
                 sel[fi] = True
     mesh.polygons.foreach_set("select", sel)
-    mesh.update()
 
 
 def _flush_selection():
@@ -102,7 +132,28 @@ def _flush_selection():
 
 
 def _clear_mask(obj):
-    """Disable paint mask and deselect all faces."""
+    """Hide the paint-mask overlay by disabling ``use_paint_mask``.
+
+    Does **not** write to ``mesh.polygons`` or call ``mesh.update()``.
+    Any mesh data write during an active brush stroke (even via a
+    deferred timer) invalidates the evaluated mesh that the paint
+    system's TBB workers are actively reading, causing partially-
+    applied masks or outright crashes.
+
+    The stale face-select bits are invisible when ``use_paint_mask``
+    is False and are unconditionally overwritten by ``_select_faces``
+    at the start of the next stroke.
+    """
+    obj.data.use_paint_mask = False
+
+
+def _full_clear_mask(obj):
+    """Fully clear the mask: deselect all faces and disable the overlay.
+
+    Safe to call from user-initiated operators (panel buttons, hotkeys)
+    where no brush stroke is active.  Must **not** be called from a
+    deferred timer during a stroke — use ``_clear_mask`` for that.
+    """
     mesh = obj.data
     mesh.use_paint_mask = False
     n = len(mesh.polygons)
@@ -164,15 +215,24 @@ class PAINTLIMIT_OT_auto_select(bpy.types.Operator):
         settings = context.scene.paint_area_limiters
         mesh = obj.data
 
-        additive = event.shift
-        subtract = event.ctrl
+        additive = event.shift and not event.ctrl
+        subtract = event.ctrl and not event.shift
+        replace = event.shift and event.ctrl
 
         # When the mask is pinned and already active, plain LMB should
         # just paint on the existing mask — don't replace it.
+        # Alt+LMB replaces the pinned mask with a new region.
         # Shift+LMB still extends the pinned mask.
         # Ctrl+LMB still subtracts from the pinned mask.
-        if settings.pin_mask_area and mesh.use_paint_mask and not additive and not subtract:
+        if settings.pin_mask_area and mesh.use_paint_mask and not additive and not subtract and not replace:
             return {"PASS_THROUGH"}
+
+        # Guard: if unapplied modifiers change the face count *and* pin
+        # is off, the deferred _clear_mask races with Blender's TBB paint
+        # workers on the evaluated mesh copy and crashes.  Auto-enable
+        # pin so the user can keep working without applying modifiers.
+        if not settings.pin_mask_area and _has_topology_modifiers(context, obj):
+            settings.pin_mask_area = True
 
         face_index = _raycast_face(context, event, obj)
         if face_index < 0:
@@ -236,6 +296,12 @@ class PAINTLIMIT_OT_auto_select(bpy.types.Operator):
         if not settings.pin_mask_area and context.mode == "PAINT_TEXTURE":
             _schedule_clear(obj.name)
 
+        # Replace (Ctrl+Shift+LMB) only swaps the mask — consume the
+        # event so the native brush doesn't also fire with Ctrl held
+        # (which would erase/deselect the face under the cursor).
+        if replace:
+            return {"FINISHED"}
+
         return {"PASS_THROUGH"}
 
 
@@ -259,7 +325,8 @@ class PAINTLIMIT_OT_clear(bpy.types.Operator):
         return obj is not None and obj.type == "MESH"
 
     def execute(self, context):
-        _clear_mask(context.active_object)
+        obj = context.active_object
+        _full_clear_mask(obj)
         return {"FINISHED"}
 
 
@@ -289,7 +356,7 @@ class PAINTLIMIT_OT_toggle(bpy.types.Operator):
         if not settings.delimiter_enabled:
             obj = context.active_object
             if obj is not None and obj.type == "MESH":
-                _clear_mask(obj)
+                _full_clear_mask(obj)
         return {"FINISHED"}
 
 
@@ -319,5 +386,5 @@ class PAINTLIMIT_OT_toggle_pin(bpy.types.Operator):
         if not settings.pin_mask_area:
             obj = context.active_object
             if obj is not None and obj.type == "MESH":
-                _clear_mask(obj)
+                _full_clear_mask(obj)
         return {"FINISHED"}

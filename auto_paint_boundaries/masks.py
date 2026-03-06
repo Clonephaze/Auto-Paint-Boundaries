@@ -40,13 +40,20 @@ def _get_selection(mesh) -> np.ndarray:
 def _set_selection(mesh, sel: np.ndarray):
     """Apply a boolean array as the face selection."""
     mesh.polygons.foreach_set("select", sel)
-    mesh.update()
+    mesh.update_tag()
 
 
 def _flush_selection():
-    """Flush face selection to the evaluated mesh (double-invert trick)."""
-    bpy.ops.paint.face_select_all(action='INVERT')
-    bpy.ops.paint.face_select_all(action='INVERT')
+    """Flush face selection to the evaluated mesh (deferred, Vertex/Weight only).
+
+    See delimiter._flush_selection for the full explanation.  Texture Paint
+    must not be flushed synchronously inside operator execute/invoke.
+    """
+    def _deferred_flush():
+        if bpy.context.view_layer:
+            bpy.context.view_layer.update()
+        return None
+    bpy.app.timers.register(_deferred_flush, first_interval=0.0)
 
 
 # ===================================================================
@@ -141,7 +148,8 @@ class PAINTLIMIT_OT_mask_load(bpy.types.Operator):
         mesh.use_paint_mask = False
         _set_selection(mesh, sel)
         mesh.use_paint_mask = True
-        _flush_selection()
+        if context.mode != "PAINT_TEXTURE":
+            _flush_selection()
 
         return {'FINISHED'}
 
