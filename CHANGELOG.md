@@ -1,6 +1,9 @@
 # Changelog
 
-## 1.1.0
+## 1.1.1 - "Minor Update to Manifest"
+- **Added "Paint" tag** to blender_manifest.toml for improved discoverability in the Blender Extensions catalog.
+
+## 1.1.0 - "Tool Header & Preferences"
 
 ### Added
 - **Tool header buttons** — Boundaries and Pin Masks controls appear directly in the tool header bar during paint modes, with inline checkboxes for quick toggling.
