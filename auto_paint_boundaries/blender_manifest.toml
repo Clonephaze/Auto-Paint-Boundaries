@@ -1,9 +1,10 @@
 schema_version = "1.0.0"
 id = "auto_paint_boundaries"
-version = "1.1.0"
+version = "1.1.1"
 name = "Auto Paint Boundaries"
 tagline = "Paint cleanly inside smart, selection-limited regions"
 maintainer = "Clonephaze"
 type = "add-on"
+tags = ["Paint"]
 blender_version_min = "4.2.0"
 license = ["SPDX:GPL-3.0-or-later"]
