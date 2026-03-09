@@ -27,10 +27,18 @@ from .masks import (
     PAINTLIMIT_OT_mask_save,
     PAINTLIMIT_UL_masks,
 )
-from .panel import VIEW3D_PT_paint_area_limiters, VIEW3D_PT_paint_area_saved_masks
+from .panel import (
+    VIEW3D_PT_paint_area_limiters,
+    VIEW3D_PT_paint_area_saved_masks,
+    VIEW3D_PT_boundary_delimiters,
+    VIEW3D_PT_boundary_masks,
+    draw_tool_header,
+)
 
 # Keymap items registered in the addon keyconfig (cleaned up in unregister).
 _addon_keymaps: list[tuple] = []
+# Shortcut keymaps for toggle/clear (drawn in addon preferences).
+_shortcut_keymaps: list[tuple] = []
 
 
 # ===================================================================
@@ -53,8 +61,9 @@ class PaintAreaLimiterSettings(bpy.types.PropertyGroup):
     delimiter_enabled: bpy.props.BoolProperty(
         name="Limit to Faces",
         description=(
-            "Automatically constrain brush strokes to a connected face "
-            "region based on the active boundary types"
+            "Enable boundary-aware painting. Brush strokes are "
+            "automatically constrained to a connected face region "
+            "based on the active boundary types"
         ),
         default=False,
     )
@@ -116,7 +125,8 @@ class PaintAreaLimiterSettings(bpy.types.PropertyGroup):
         description=(
             "Keep the face mask between brush strokes instead of "
             "clearing it automatically after each stroke.\n"
-            "Shift+Click to add regions, Ctrl+Click to subtract"
+            "When pinned, Shift+Click adds regions and "
+            "Ctrl+Click subtracts them"
         ),
         default=False,
         update=_on_pin_mask_update,
@@ -135,9 +145,140 @@ class PaintAreaMaskItem(bpy.types.PropertyGroup):
     )
 
 
+# ===================================================================
+#  Addon Preferences
+# ===================================================================
+
+
+class PaintAreaLimiterPreferences(bpy.types.AddonPreferences):
+    bl_idname = __package__
+
+    # -- Startup defaults --------------------------------------------------
+
+    default_enabled: bpy.props.BoolProperty(
+        name="Enable Boundaries",
+        description="Start with boundary-aware painting enabled",
+        default=False,
+    )
+    default_pin_mask: bpy.props.BoolProperty(
+        name="Pin Mask Area",
+        description="Start with mask pinning enabled",
+        default=False,
+    )
+    default_use_single_face: bpy.props.BoolProperty(
+        name="Single Face", default=True,
+    )
+    default_use_sharp: bpy.props.BoolProperty(
+        name="Sharp Edges", default=False,
+    )
+    default_use_uv_island: bpy.props.BoolProperty(
+        name="UV Seams", default=False,
+    )
+    default_use_normal: bpy.props.BoolProperty(
+        name="Normal Angle", default=False,
+    )
+    default_use_face_set: bpy.props.BoolProperty(
+        name="Face Set", default=False,
+    )
+    default_use_crease: bpy.props.BoolProperty(
+        name="Crease Edges", default=False,
+    )
+    default_use_bevel: bpy.props.BoolProperty(
+        name="Bevel Weight", default=False,
+    )
+    default_use_mesh_island: bpy.props.BoolProperty(
+        name="Mesh Island", default=False,
+    )
+    default_normal_angle: bpy.props.FloatProperty(
+        name="Angle",
+        subtype='ANGLE',
+        min=0.0,
+        max=3.14159,
+        default=0.5236,  # 30 degrees
+    )
+
+    def draw(self, context):
+        layout = self.layout
+
+        # -- Shortcuts -----------------------------------------------------
+        box = layout.box()
+        box.label(text="Shortcuts", icon='EVENT_OS')
+        col = box.column()
+
+        wm = context.window_manager
+        kc = wm.keyconfigs.user
+        km = kc.keymaps.get("3D View")
+        if km:
+            import rna_keymap_ui
+            # Draw in a deliberate order.
+            draw_order = (
+                "paint_limit.toggle",
+                "paint_limit.toggle_pin",
+                "paint_limit.clear",
+            )
+            kmi_map = {}
+            for kmi in km.keymap_items:
+                if kmi.idname in draw_order and kmi.idname not in kmi_map:
+                    kmi_map[kmi.idname] = kmi
+            for op_id in draw_order:
+                kmi = kmi_map.get(op_id)
+                if kmi:
+                    col.context_pointer_set("keymap", km)
+                    rna_keymap_ui.draw_kmi([], kc, km, kmi, col, 0)
+
+        # -- Startup Defaults ----------------------------------------------
+        box = layout.box()
+        box.label(text="Startup Defaults", icon='PREFERENCES')
+        col = box.column()
+        col.prop(self, "default_enabled")
+        col.prop(self, "default_pin_mask")
+
+        col.separator()
+        col.label(text="Boundary Types:")
+        col.prop(self, "default_use_single_face")
+        col.prop(self, "default_use_sharp")
+        col.prop(self, "default_use_uv_island")
+        row = col.row(align=True)
+        row.prop(self, "default_use_normal")
+        sub = row.row(align=True)
+        sub.active = self.default_use_normal
+        sub.prop(self, "default_normal_angle")
+        col.prop(self, "default_use_face_set")
+        col.prop(self, "default_use_crease")
+        col.prop(self, "default_use_bevel")
+        col.prop(self, "default_use_mesh_island")
+
+
+@bpy.app.handlers.persistent
+def _apply_startup_defaults(_dummy):
+    """Apply user-configured defaults when starting with a new file."""
+    if bpy.data.filepath:
+        return  # Opening a saved file — keep its settings.
+
+    addon = bpy.context.preferences.addons.get(__package__)
+    if addon is None:
+        return
+    p = addon.preferences
+
+    for scene in bpy.data.scenes:
+        s = scene.paint_area_limiters
+        s.delimiter_enabled = p.default_enabled
+        s.pin_mask_area = p.default_pin_mask
+        s.use_single_face = p.default_use_single_face
+        s.use_sharp = p.default_use_sharp
+        s.use_uv_island = p.default_use_uv_island
+        s.use_normal = p.default_use_normal
+        s.use_face_set = p.default_use_face_set
+        s.use_crease = p.default_use_crease
+        s.use_bevel = p.default_use_bevel
+        s.use_mesh_island = p.default_use_mesh_island
+        s.normal_angle = p.default_normal_angle
+
+
 _classes = (
     PaintAreaMaskItem,
     PaintAreaLimiterSettings,
+    PaintAreaLimiterPreferences,
     PAINTLIMIT_OT_auto_select,
     PAINTLIMIT_OT_clear,
     PAINTLIMIT_OT_toggle,
@@ -149,6 +290,8 @@ _classes = (
     PAINTLIMIT_UL_masks,
     VIEW3D_PT_paint_area_limiters,
     VIEW3D_PT_paint_area_saved_masks,
+    VIEW3D_PT_boundary_delimiters,
+    VIEW3D_PT_boundary_masks,
 )
 
 
@@ -163,6 +306,15 @@ def register():
         type=PaintAreaMaskItem,
     )
     bpy.types.Object.paint_area_masks_active = bpy.props.IntProperty()
+
+    # -- Shortcut keymaps (toggle/clear, shown in preferences) ---------------
+    kc = bpy.context.window_manager.keyconfigs.addon
+    if kc:
+        km = kc.keymaps.new(name="3D View", space_type='VIEW_3D')
+        for op_id in ("paint_limit.toggle", "paint_limit.toggle_pin",
+                      "paint_limit.clear"):
+            kmi = km.keymap_items.new(op_id, 'NONE', 'PRESS')
+            _shortcut_keymaps.append((km, kmi))
 
     # -- Keymap registration -----------------------------------------------
     # Addon keyconfig items are checked before default keyconfig items.
@@ -189,26 +341,29 @@ def register():
                 ctrl=True,
             )
             _addon_keymaps.append((km, kmi))
-            # Alt+LMB — replace pinned mask with new region
+            # Ctrl+Shift+LMB — replace pinned mask with new region
             kmi = km.keymap_items.new(
                 "paint_limit.auto_select", 'LEFTMOUSE', 'PRESS',
                 ctrl=True, shift=True,
             )
             _addon_keymaps.append((km, kmi))
-            # D — toggle limiter on/off
-            kmi = km.keymap_items.new(
-                "paint_limit.toggle", 'D', 'PRESS',
-            )
-            _addon_keymaps.append((km, kmi))
-            # Shift+D — toggle pin mask area
-            kmi = km.keymap_items.new(
-                "paint_limit.toggle_pin", 'D', 'PRESS',
-                shift=True,
-            )
-            _addon_keymaps.append((km, kmi))
+
+    # -- Tool header popover buttons --------------------------------------
+    bpy.types.VIEW3D_HT_tool_header.append(draw_tool_header)
+
+    # -- Load handler for startup defaults ---------------------------------
+    bpy.app.handlers.load_post.append(_apply_startup_defaults)
 
 
 def unregister():
+
+    bpy.app.handlers.load_post.remove(_apply_startup_defaults)
+
+    bpy.types.VIEW3D_HT_tool_header.remove(draw_tool_header)
+
+    for km, kmi in _shortcut_keymaps:
+        km.keymap_items.remove(kmi)
+    _shortcut_keymaps.clear()
 
     for km, kmi in _addon_keymaps:
         km.keymap_items.remove(kmi)

@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "auto_paint_boundaries"
-version = "1.0.0"
+version = "1.1.0"
 name = "Auto Paint Boundaries"
 tagline = "Paint cleanly inside smart, selection-limited regions"
 maintainer = "Clonephaze"
